@@ -91,6 +91,27 @@ check "full-cleanup policy holds exactly those deletes plus read-only lookups" \
   '[[ "$cleanup_actions" == "ecr:DeleteRepository ecr:DescribeImages ecr:DescribeRepositories ecs:DescribeClusters iam:DeleteRole iam:DetachRolePolicy iam:GetRole iam:ListAttachedRolePolicies" ]]'
 
 # ---------------------------------------------------------------------------
+echo "== Local Jenkins setup (static)"
+INIT="$REPO/jenkins/init.groovy.d/10-experiment5-job.groovy"
+params_match="$(python3 - "$REPO/Jenkinsfile" "$INIT" <<'EOF'
+import re, sys
+jf, init = (open(p).read() for p in sys.argv[1:])
+want = (re.search(r"choice\(name: 'ACTION', choices: \[([^\]]*)\]", jf).group(1),
+        re.findall(r"string\(name: '(\w+)'", jf))
+got = (re.search(r"ChoiceParameterDefinition\('ACTION', \[([^\]]*)\]", init).group(1),
+       re.findall(r"StringParameterDefinition\('(\w+)'", init))
+print("yes" if want == got and want[0].lstrip().startswith("'STATUS'") else f"no: Jenkinsfile={want} init={got}")
+EOF
+)"
+check "init script parameters match the Jenkinsfile, STATUS first (default)" '[[ "$params_match" == yes ]] || { echo "$params_match" >"$OUT"; false; }'
+check "init script never schedules a build or adds triggers" '! grep -nE "scheduleBuild|Trigger|\.build\(" "$INIT"'
+check "compose publishes Jenkins on 127.0.0.1 only, never privileged" \
+  'grep -qE "^\s+- \"127\.0\.0\.1:" "$REPO/jenkins/compose.yaml" && ! grep -qiE "privileged|0\.0\.0\.0" "$REPO/jenkins/compose.yaml"'
+check "compose mounts the repository read-only" 'grep -qE ":/repo:ro\"?$" "$REPO/jenkins/compose.yaml"'
+check "Jenkins setup files contain no AWS keys or secret-valued variables" \
+  '! grep -rnE "(AKIA|ASIA)[A-Z0-9]{16}|^\s*-?\s*[A-Z_]*(PASSWORD|SECRET|TOKEN|ACCESS_KEY)[A-Z_]*\s*[:=]" "$REPO/jenkins" "$REPO/Jenkinsfile"'
+
+# ---------------------------------------------------------------------------
 echo "== Issue 1: aws_text runs the CLI once and never turns an error into empty"
 COUNT_BIN="$TMP/count-bin"
 mkdir -p "$COUNT_BIN"

@@ -1,24 +1,38 @@
-# Jenkins controller for Experiment 5. Use jenkins/start.sh rather than
-# running compose directly: it sets DOCKER_GID so the jenkins user can reach
-# the Docker Desktop socket.
-#
-# Security: the mounted Docker socket gives Jenkins root-equivalent control of
-# the Docker Desktop VM, so the UI is bound to localhost only.
+# Local Jenkins controller for Experiment 5. Start it with jenkins/start.sh,
+# which detects DOCKER_GID so the jenkins user can reach the Docker socket.
+# For a trusted, single-user machine only:
+#   - The Docker socket gives Jenkins root-equivalent control of the Docker
+#     Desktop VM (it can start any container and mount anything in the VM).
+#   - The UI is published on 127.0.0.1 only; never expose it beyond localhost.
+#   - Local Git checkouts are allowed so the job can clone the read-only
+#     repository mount without pushing to GitHub.
 name: exp5-jenkins
 
 services:
   jenkins:
     build: .
     image: exp5-jenkins:2.580.1
-    container_name: exp5-jenkins
     restart: "no"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${JENKINS_PORT:-8080}:8080"
     group_add:
       - "${DOCKER_GID:-0}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/login"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    environment:
+      JAVA_OPTS: "-Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true"
+      EXP5_JOB_NAME: experiment5-containerized-app
+      EXP5_REPO_URL: "${EXP5_REPO_URL:-file:///repo}"
+      EXP5_REPO_BRANCH: "${EXP5_REPO_BRANCH:-main}"
     volumes:
       - jenkins_home:/var/jenkins_home
       - /var/run/docker.sock:/var/run/docker.sock
+      # The repository the job clones (committed history only, read-only).
+      - "${EXP5_REPO_DIR:-..}:/repo:ro"
 
 volumes:
   jenkins_home:

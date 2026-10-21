@@ -3,11 +3,22 @@
 // read-only STATUS so an accidental "Build" never changes anything.
 
 // Runs body with AWS keys from a Jenkins "Username with password" credential.
+// A missing credential stops the build before any AWS call is made.
 def withAws(String credentialsId, Closure body) {
-  withCredentials([usernamePassword(credentialsId: credentialsId,
-                                    usernameVariable: 'AWS_ACCESS_KEY_ID',
-                                    passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-    body()
+  try {
+    withCredentials([usernamePassword(credentialsId: credentialsId,
+                                      usernameVariable: 'AWS_ACCESS_KEY_ID',
+                                      passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+      body()
+    }
+  } catch (Exception e) {
+    if (e.message?.contains("Could not find credentials entry with ID '${credentialsId}'")) {
+      error("AWS credential '${credentialsId}' is not configured in Jenkins, so no AWS call was made. " +
+            'Add it under Manage Jenkins > Credentials > System > Global credentials as ' +
+            '"Username with password" (username = access key ID, password = secret access key). ' +
+            'See README > Local Jenkins.')
+    }
+    throw e
   }
 }
 
