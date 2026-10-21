@@ -19,6 +19,17 @@ app.get("/", (req, res) => {
   `);
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
+});
+
+// ECS sends SIGTERM when stopping a task; exit promptly instead of waiting
+// for the 30-second SIGKILL timeout.
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down");
+  server.close(() => process.exit(0));
 });

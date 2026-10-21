@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Fake docker: logs calls; exec answers like the app; push stores the tag in
+# the fake ECR (through the fake aws, so ECR push permissions are checked).
+echo "docker $*" >>"$MOCK_LOG"
+case "$1" in
+  exec) [[ "$*" == *"-O -"* ]] && echo "<h2>Application is running successfully!</h2>" ;;
+  info) echo "29.6.1" ;;
+  login) cat >/dev/null ;;
+  push)
+    repo_tag="${2#*/}"
+    aws ecr x-docker-push "${repo_tag##*:}" --repository-name "${repo_tag%%:*}" >/dev/null || exit 1
+    ;;
+esac
+exit 0

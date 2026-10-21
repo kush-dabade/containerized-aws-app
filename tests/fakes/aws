@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""Stateful fake AWS CLI for offline tests of the Experiment 5 scripts.
+
+Environment:
+  MOCK_STATE   JSON file holding the fake account's resources (required)
+  MOCK_LOG     every call is appended here, one line per call (required)
+  MOCK_POLICY  rendered IAM policy; calls whose IAM actions it does not allow
+               fail with AccessDeniedException (action-level check only)
+  MOCK_ARN     caller ARN returned by sts get-caller-identity
+  MOCK_FAIL    comma-separated "service:operation" pairs that fail with
+               ThrottlingException, to test error handling
+"""
+import fnmatch
+import json
+import os
+import sys
+
+import jmespath
+
+ACCT, REGION = "123456789012", "ap-south-1"
+STATE, LOG = os.environ["MOCK_STATE"], os.environ["MOCK_LOG"]
+QUIET_OPTS = {"query", "output", "cli-input-json", "assume-role-policy-document", "lifecycle-policy-text"}
+
+argv = sys.argv[1:]
+svc, op = argv[0], argv[1]
+opts, pos, i = {}, [], 2
+while i < len(argv):
+    if argv[i].startswith("--"):
+        key, i, vals = argv[i][2:], i + 1, []
+        while i < len(argv) and not argv[i].startswith("--"):
+            vals.append(argv[i])
+            i += 1
+        opts[key] = vals
+    else:
+        pos.append(argv[i])
+        i += 1
+if op == "wait":
+    op = "wait-" + pos[0]
+
+
+def one(key, default=None):
+    return opts[key][0] if opts.get(key) else default
+
+
+with open(LOG, "a") as f:
+    shown = [f"--{k} {' '.join(v)}".strip() for k, v in opts.items() if k not in QUIET_OPTS]
+    f.write(" ".join([svc, op] + shown) + "\n")
+
+try:
+    with open(STATE) as f:
+        st = json.load(f)
+except FileNotFoundError:
+    st = {}
+for key in ("repos", "roles", "logs", "sgs", "clusters", "tds", "services", "tasks"):
+    st.setdefault(key, {})
+st.setdefault("seq", 0)
+st.setdefault("sg_busy", 0)
+
+
+def save():
+    with open(STATE, "w") as f:
+        json.dump(st, f, indent=1)
+
+
+def err(code, msg="mock error"):
+    save()
+    sys.stderr.write(f"\nAn error occurred ({code}) when calling the {op} operation: {msg}\n")
+    sys.exit(254)
+
+
+def text(v):
+    if v is None:
+        return "None"
+    if isinstance(v, (str, int, float, bool)):
+        return str(v)
+    if isinstance(v, dict):
+        return "\t".join(text(x) for x in v.values())
+    if all(not isinstance(x, (list, dict)) for x in v):
+        return "\t".join(text(x) for x in v)
+    return "\n".join(text(x) for x in v)
+
+
+def out(resp):
+    save()
+    q = one("query")
+    r = jmespath.search(q, resp) if q else resp
+    if one("output") == "text":
+        s = text(r)
+        if s:
+            print(s)
+    elif r:
+        print(json.dumps(r))
+    sys.exit(0)
+
+
+def nid():
+    st["seq"] += 1
+    return f"{st['seq']:017x}"
+
+
+# --- IAM authorization (action level) -------------------------------------
+
+def iam_actions():
+    if svc == "sts":
+        return []
+    special = {
+        ("ecr", "get-login-password"): ["ecr:GetAuthorizationToken"],
+        ("ecr", "x-docker-push"): ["ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload",
+                                   "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage"],
+        ("ecs", "wait-services-stable"): ["ecs:DescribeServices"],
+        ("ecs", "wait-services-inactive"): ["ecs:DescribeServices"],
+        ("ecs", "wait-tasks-stopped"): ["ecs:DescribeTasks"],
+        ("iam", "wait-role-exists"): ["iam:GetRole"],
+    }
+    if (svc, op) in special:
+        return special[(svc, op)]
+    acts = [f"{svc}:" + "".join(w.capitalize() for w in op.split("-"))]
+    # Actions the service authorizes implicitly (Service Authorization Reference).
+    if svc == "ecr" and op == "create-repository" and "tags" in opts:
+        acts.append("ecr:TagResource")
+    if svc == "ecs" and op in ("create-cluster", "create-service") and "tags" in opts:
+        acts.append("ecs:TagResource")
+    if svc == "ecs" and op == "register-task-definition":
+        td = json.loads(one("cli-input-json"))
+        acts.append("iam:PassRole")
+        if td.get("tags"):
+            acts.append("ecs:TagResource")
+    if svc == "ec2" and op == "create-security-group" and "tag-specifications" in opts:
+        acts.append("ec2:CreateTags")
+    if svc == "logs" and op == "create-log-group" and "tags" in opts:
+        acts += ["logs:TagLogGroup", "logs:TagResource"]
+    if svc == "iam" and op == "create-role" and "tags" in opts:
+        acts.append("iam:TagRole")
+    return acts
+
+
+policy_file = os.environ.get("MOCK_POLICY")
+if policy_file:
+    with open(policy_file) as f:
+        allowed = [a for s in json.load(f)["Statement"] if s["Effect"] == "Allow"
+                   for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])]
+    for action in iam_actions():
+        if not any(fnmatch.fnmatchcase(action, pattern) for pattern in allowed):
+            err("AccessDeniedException", f"not authorized to perform: {action}")
+
+if f"{svc}:{op}" in [x.strip() for x in os.environ.get("MOCK_FAIL", "").split(",") if x.strip()]:
+    err("ThrottlingException", "Rate exceeded (injected by MOCK_FAIL)")
+
+if svc == "sts" and op == "get-caller-identity":
+    out({"Account": ACCT, "Arn": os.environ.get("MOCK_ARN", f"arn:aws:iam::{ACCT}:user/jenkins-containerized-app-deployer")})
+
+# --- ECR -------------------------------------------------------------------
+if svc == "ecr":
+    if op == "get-login-password":
+        print("mock-token")
+        sys.exit(0)
+    name = one("repository-name") or (opts.get("repository-names") or [None])[0]
+    if op == "create-repository":
+        if name in st["repos"]:
+            err("RepositoryAlreadyExistsException")
+        st["repos"][name] = {"images": [], "mutability": one("image-tag-mutability"), "lifecycle": False}
+        out({"repository": {"repositoryName": name}})
+    if name not in st["repos"]:
+        err("RepositoryNotFoundException", f"The repository with name '{name}' does not exist")
+    repo = st["repos"][name]
+    if op == "describe-repositories":
+        out({"repositories": [{"repositoryName": name}]})
+    if op == "put-lifecycle-policy":
+        repo["lifecycle"] = True
+        out({})
+    if op == "x-docker-push":
+        repo["images"].append(pos[0])
+        out({})
+    if op == "describe-images":
+        if opts.get("image-ids"):
+            tag = opts["image-ids"][0].split("=", 1)[1]
+            if tag not in repo["images"]:
+                err("ImageNotFoundException")
+            out({"imageDetails": [{"imageTags": [tag]}]})
+        out({"imageDetails": [{"imageTags": [t], "imagePushedAt": n} for n, t in enumerate(repo["images"])]})
+    if op == "delete-repository":
+        if repo["images"] and "force" not in opts:
+            err("RepositoryNotEmptyException")
+        del st["repos"][name]
+        out({})
+
+# --- IAM -------------------------------------------------------------------
+if svc == "iam":
+    name = one("role-name")
+    if op == "create-role":
+        if name in st["roles"]:
+            err("EntityAlreadyExists")
+        json.loads(one("assume-role-policy-document"))
+        st["roles"][name] = {"attached": []}
+        out({"Role": {"RoleName": name}})
+    if name not in st["roles"]:
+        err("NoSuchEntity", f"The role with name {name} cannot be found.")
+    role = st["roles"][name]
+    if op in ("get-role", "wait-role-exists"):
+        out({"Role": {"RoleName": name}})
+    if op == "list-attached-role-policies":
+        out({"AttachedPolicies": [{"PolicyArn": a} for a in role["attached"]]})
+    if op == "attach-role-policy":
+        if one("policy-arn") not in role["attached"]:
+            role["attached"].append(one("policy-arn"))
+        out({})
+    if op == "detach-role-policy":
+        if one("policy-arn") not in role["attached"]:
+            err("NoSuchEntity")
+        role["attached"].remove(one("policy-arn"))
+        out({})
+    if op == "delete-role":
+        if role["attached"]:
+            err("DeleteConflict")
+        del st["roles"][name]
+        out({})
+
+# --- CloudWatch Logs -------------------------------------------------------
+if svc == "logs":
+    group = one("log-group-name")
+    if op == "describe-log-groups":
+        prefix = one("log-group-name-prefix", "")
+        out({"logGroups": [{"logGroupName": n} for n in st["logs"] if n.startswith(prefix)]})
+    if op == "create-log-group":
+        if group in st["logs"]:
+            err("ResourceAlreadyExistsException")
+        st["logs"][group] = {"retention": None}
+        out({})
+    if group not in st["logs"]:
+        err("ResourceNotFoundException")
+    if op == "put-retention-policy":
+        st["logs"][group]["retention"] = one("retention-in-days")
+        out({})
+    if op == "delete-log-group":
+        del st["logs"][group]
+        out({})
+    if op == "filter-log-events":
+        out({"events": [{"message": "Server running on port 3000"}]})
+
+# --- EC2 -------------------------------------------------------------------
+DEFAULT_VPC = "vpc-0default00000000"
+if svc == "ec2":
+    if op == "describe-network-interfaces":
+        out({"NetworkInterfaces": [{"Association": {"PublicIp": "198.51.100.20"}}]})
+    if op == "describe-vpcs":
+        out({"Vpcs": [{"VpcId": DEFAULT_VPC}]})
+    if op == "describe-subnets":
+        out({"Subnets": [{"SubnetId": f"subnet-0{a}"} for a in ("aaa", "bbb", "ccc")]})
+    if op == "describe-security-groups":
+        if "group-ids" in opts:
+            sg = st["sgs"].get(opts["group-ids"][0]) or err("InvalidGroup.NotFound")
+            out({"SecurityGroups": [sg]})
+        filters = {f.split(",", 1)[0].split("=", 1)[1]: f.split("Values=", 1)[1] for f in opts.get("filters", [])}
+
+        def matches(sg):
+            tags = {t["Key"]: t["Value"] for t in sg.get("Tags", [])}
+            return all([
+                filters.get("vpc-id") in (None, sg["VpcId"]),
+                filters.get("group-name") in (None, sg["GroupName"]),
+                filters.get("tag:Project") in (None, tags.get("Project")),
+            ])
+        out({"SecurityGroups": [sg for sg in st["sgs"].values() if matches(sg)]})
+    if op == "create-security-group":
+        spec = one("tag-specifications", "")
+        if "Key=Project,Value=containerized-aws-app" not in spec:
+            err("UnauthorizedOperation", "policy requires the Project tag at creation")
+        if any(s["GroupName"] == one("group-name") and s["VpcId"] == one("vpc-id") for s in st["sgs"].values()):
+            err("InvalidGroup.Duplicate")
+        gid = "sg-" + nid()
+        st["sgs"][gid] = {"GroupId": gid, "GroupName": one("group-name"), "VpcId": one("vpc-id"),
+                          "Tags": [{"Key": "Project", "Value": "containerized-aws-app"}], "IpPermissions": []}
+        out({"GroupId": gid})
+    gid = one("group-id")
+    if gid not in st["sgs"]:
+        err("InvalidGroup.NotFound")
+    sg = st["sgs"][gid]
+    port, cidr = one("port"), one("cidr")
+    if op == "authorize-security-group-ingress":
+        perm = next((p for p in sg["IpPermissions"] if p["FromPort"] == int(port)), None)
+        if perm is None:
+            perm = {"FromPort": int(port), "ToPort": int(port), "IpProtocol": "tcp", "IpRanges": []}
+            sg["IpPermissions"].append(perm)
+        if any(r["CidrIp"] == cidr for r in perm["IpRanges"]):
+            err("InvalidPermission.Duplicate")
+        perm["IpRanges"].append({"CidrIp": cidr})
+        out({"Return": True})
+    if op == "revoke-security-group-ingress":
+        for p in sg["IpPermissions"]:
+            p["IpRanges"] = [r for r in p["IpRanges"] if r["CidrIp"] != cidr]
+        sg["IpPermissions"] = [p for p in sg["IpPermissions"] if p["IpRanges"]]
+        out({"Return": True})
+    if op == "delete-security-group":
+        in_use = any(t["lastStatus"] != "STOPPED" for t in st["tasks"].values())
+        if in_use or st["sg_busy"] > 0:
+            st["sg_busy"] = max(0, st["sg_busy"] - 1)
+            err("DependencyViolation", "resource has a dependent object")
+        del st["sgs"][gid]
+        out({})
+
+# --- ECS -------------------------------------------------------------------
+if svc == "ecs":
+    cname = one("cluster") or one("cluster-name") or (opts.get("clusters") or [None])[0]
+    sname = one("service") or one("service-name") or (opts.get("services") or [None])[0]
+
+    def cluster_now(name):
+        """Current status, consuming one scripted transitional status if any."""
+        c = st["clusters"].get(name)
+        if not c:
+            return None
+        if c.get("pending"):
+            return c["pending"].pop(0)
+        return c["status"]
+
+    if op == "describe-clusters":
+        c = st["clusters"].get(cname)
+        if c and c.get("failure_reason"):
+            out({"clusters": [], "failures": [{"arn": cname, "reason": c["failure_reason"]}]})
+        status = cluster_now(cname)
+        if status is None:
+            out({"clusters": [], "failures": [{"arn": cname, "reason": "MISSING"}]})
+        tasks = [t for t in st["tasks"].values() if t["cluster"] == cname]
+        out({"clusters": [{
+            "clusterName": cname, "status": status,
+            "runningTasksCount": sum(t["lastStatus"] == "RUNNING" for t in tasks),
+            "pendingTasksCount": 0,
+            "activeServicesCount": sum(s["status"] == "ACTIVE" for k, s in st["services"].items()
+                                       if k.startswith(cname + "/"))}], "failures": []})
+    if op == "create-cluster":
+        assert "name=containerInsights,value=disabled" in opts.get("settings", []), "Container Insights not disabled"
+        st["clusters"][cname] = {"status": "ACTIVE", "pending": st.pop("create_pending", [])}
+        out({"cluster": {"clusterName": cname}})
+    if op == "register-task-definition":
+        td = json.loads(one("cli-input-json"))
+        for key in ("family", "executionRoleArn", "containerDefinitions", "cpu", "memory"):
+            assert key in td, key
+        assert td["containerDefinitions"][0]["logConfiguration"]["logDriver"] == "awslogs"
+        fam = td["family"]
+        rev = 1 + max([int(k.rsplit(":", 1)[1]) for k in st["tds"] if k.rsplit(":", 1)[0] == fam] or [0])
+        arn = f"arn:aws:ecs:{REGION}:{ACCT}:task-definition/{fam}:{rev}"
+        st["tds"][f"{fam}:{rev}"] = {"arn": arn, "status": "ACTIVE", "image": td["containerDefinitions"][0]["image"]}
+        out({"taskDefinition": {"taskDefinitionArn": arn}})
+    if op == "list-task-definitions":
+        prefix, status = one("family-prefix"), one("status", "ACTIVE")
+        out({"taskDefinitionArns": [t["arn"] for k, t in st["tds"].items()
+                                    if k.startswith(prefix) and t["status"] == status]})
+    if op == "deregister-task-definition":
+        st["tds"][one("task-definition").split("/")[-1]]["status"] = "INACTIVE"
+        out({})
+    if op == "delete-task-definitions":
+        failures = []
+        for arn in opts["task-definitions"]:
+            key = arn.split("/")[-1]
+            if st["tds"][key]["status"] != "INACTIVE":
+                failures.append({"arn": arn, "reason": "TASK_DEFINITION_NOT_INACTIVE"})
+            else:
+                st["tds"][key]["status"] = "DELETE_IN_PROGRESS"
+        out({"failures": failures})
+
+    # Everything below needs an ACTIVE cluster, as in real ECS.
+    if st["clusters"].get(cname, {}).get("status") != "ACTIVE":
+        err("ClusterNotFoundException", "Cluster not found.")
+    key = f"{cname}/{sname}"
+
+    def run_task(td_arn):
+        tid = nid()
+        st["tasks"][tid] = {"arn": f"arn:aws:ecs:{REGION}:{ACCT}:task/{cname}/{tid}", "cluster": cname,
+                            "service": sname, "td": td_arn, "lastStatus": "RUNNING", "desiredStatus": "RUNNING"}
+
+    def stop_service_tasks():
+        for t in st["tasks"].values():
+            if t["service"] == sname and t["cluster"] == cname and t["desiredStatus"] == "RUNNING":
+                t["desiredStatus"] = "STOPPED"
+
+    if op == "describe-services":
+        s = st["services"].get(key)
+        if not s:
+            out({"services": [], "failures": [{"arn": sname, "reason": "MISSING"}]})
+        running = sum(t["lastStatus"] == "RUNNING" and t["desiredStatus"] == "RUNNING"
+                      for t in st["tasks"].values() if t["service"] == sname)
+        out({"services": [{"serviceName": sname, "status": s["status"], "runningCount": running,
+                           "desiredCount": s["desired"], "taskDefinition": s["td"], "events": [],
+                           "deployments": [{"status": "PRIMARY", "taskDefinition": s["td"], "rolloutState": "COMPLETED"}]}],
+             "failures": []})
+    if op == "create-service":
+        if st["services"].get(key, {}).get("status") in ("ACTIVE", "DRAINING"):
+            err("InvalidParameterException", "Creation of service was not idempotent.")
+        assert "deploymentCircuitBreaker={enable=true,rollback=true}" in one("deployment-configuration")
+        st["services"][key] = {"status": "ACTIVE", "desired": int(one("desired-count")), "td": one("task-definition")}
+        run_task(one("task-definition"))
+        out({})
+    if op == "update-service":
+        s = st["services"].get(key) or err("ServiceNotFoundException")
+        if s["status"] != "ACTIVE":
+            err("ServiceNotActiveException")
+        if "desired-count" in opts:
+            s["desired"] = int(one("desired-count"))
+        if "task-definition" in opts and one("task-definition") != s["td"]:
+            s["td"] = one("task-definition")
+            stop_service_tasks()
+            run_task(s["td"])
+        if s["desired"] == 0:
+            stop_service_tasks()
+        out({})
+    if op == "delete-service":
+        s = st["services"].get(key) or err("ServiceNotFoundException")
+        if s["desired"] > 0 and "force" not in opts:
+            err("InvalidParameterException")
+        s["status"] = "DRAINING"
+        stop_service_tasks()
+        out({})
+    if op == "wait-services-stable":
+        out(None)
+    if op == "wait-services-inactive":
+        st["services"][key]["status"] = "INACTIVE"
+        out(None)
+    if op == "list-tasks":
+        want = one("desired-status", "RUNNING")
+        out({"taskArns": [t["arn"] for t in st["tasks"].values()
+                          if t["cluster"] == cname and t["desiredStatus"] == want and (not sname or t["service"] == sname)]})
+    if op == "wait-tasks-stopped":
+        for t in st["tasks"].values():
+            if t["arn"] in opts["tasks"]:
+                t["lastStatus"] = "STOPPED"
+        out(None)
+    if op == "describe-tasks":
+        out({"tasks": [{"taskArn": t["arn"], "taskDefinitionArn": t["td"], "lastStatus": t["lastStatus"],
+                        "attachments": [{"details": [{"name": "networkInterfaceId", "value": "eni-0mock"}]}]}
+                       for t in st["tasks"].values() if t["arn"] in opts["tasks"]]})
+    if op == "delete-cluster":
+        if any(t["cluster"] == cname and t["lastStatus"] != "STOPPED" for t in st["tasks"].values()):
+            err("ClusterContainsTasksException")
+        if any(k.startswith(cname + "/") and s["status"] in ("ACTIVE", "DRAINING") for k, s in st["services"].items()):
+            err("ClusterContainsServicesException")
+        st["clusters"][cname] = {"status": "INACTIVE", "pending": st.pop("delete_pending", [])}
+        st["tasks"] = {k: t for k, t in st["tasks"].items() if t["cluster"] != cname}
+        st["services"] = {k: s for k, s in st["services"].items() if not k.startswith(cname + "/")}
+        out({})
+
+err("MockNotImplemented", f"{svc} {op}")

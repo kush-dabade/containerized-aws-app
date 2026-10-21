@@ -11,5 +11,11 @@ npm-debug.log*
 Dockerfile
 .dockerignore
 README.md
+Jenkinsfile
+jenkins/
+scripts/
+iam/
 task-definition*.json
-ecs-task-trust-policy.json
+app-url.txt
+tests/
+.venv-test/

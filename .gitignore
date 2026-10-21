@@ -30,6 +30,14 @@ Thumbs.db
 docker-compose.override.yml
 *.tar
 
-# AWS: account-specific deployment config (use task-definition.example.json)
+# AWS: account-specific files (templates are committed; rendered copies are not)
 task-definition.json
+iam/rendered/
 .aws/
+
+# Jenkins/smoke-test output
+app-url.txt
+
+# Offline test venv (tests/run-tests.sh)
+.venv-test/
+.test-dirty-probe

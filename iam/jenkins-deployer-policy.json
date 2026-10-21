@@ -1,0 +1,220 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrLogin",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrProjectRepository",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:DescribeRepositories",
+        "ecr:CreateRepository",
+        "ecr:TagResource",
+        "ecr:PutLifecyclePolicy",
+        "ecr:DescribeImages",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage"
+      ],
+      "Resource": "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_REPO}"
+    },
+    {
+      "Sid": "EcsProjectCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:DescribeClusters",
+        "ecs:DeleteCluster"
+      ],
+      "Resource": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}"
+    },
+    {
+      "Sid": "EcsProjectService",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateService",
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:DeleteService"
+      ],
+      "Resource": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:service/${ECS_CLUSTER}/${ECS_SERVICE}"
+    },
+    {
+      "Sid": "EcsProjectTaskDefinitionFamily",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeleteTaskDefinitions"
+      ],
+      "Resource": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${TASK_FAMILY}:*"
+    },
+    {
+      "Sid": "EcsTagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ecs:TagResource",
+      "Resource": [
+        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}",
+        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:service/${ECS_CLUSTER}/${ECS_SERVICE}",
+        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${TASK_FAMILY}:*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ecs:CreateAction": ["CreateCluster", "CreateService", "RegisterTaskDefinition"]
+        }
+      }
+    },
+    {
+      "Sid": "EcsTaskDefinitionNoResourceLevelSupport",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:ListTaskDefinitions",
+        "ecs:DeregisterTaskDefinition"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "${AWS_REGION}" }
+      }
+    },
+    {
+      "Sid": "EcsListTasksInProjectCluster",
+      "Effect": "Allow",
+      "Action": "ecs:ListTasks",
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}"
+        }
+      }
+    },
+    {
+      "Sid": "EcsDescribeProjectTasks",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeTasks",
+      "Resource": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task/${ECS_CLUSTER}/*"
+    },
+    {
+      "Sid": "PassExecutionRoleToEcsTasksOnly",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${EXEC_ROLE_NAME}",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "ManageExecutionRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:CreateRole",
+        "iam:TagRole",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${EXEC_ROLE_NAME}"
+    },
+    {
+      "Sid": "AttachOnlyEcsTaskExecutionPolicy",
+      "Effect": "Allow",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${EXEC_ROLE_NAME}",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        }
+      }
+    },
+    {
+      "Sid": "ProjectLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:TagLogGroup",
+        "logs:TagResource",
+        "logs:PutRetentionPolicy",
+        "logs:FilterLogEvents",
+        "logs:DeleteLogGroup"
+      ],
+      "Resource": [
+        "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${LOG_GROUP}",
+        "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${LOG_GROUP}:*"
+      ]
+    },
+    {
+      "Sid": "LogsDescribeNoResourceLevelSupport",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "${AWS_REGION}" }
+      }
+    },
+    {
+      "Sid": "Ec2DescribeNoResourceLevelSupport",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeNetworkInterfaces"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "${AWS_REGION}" }
+      }
+    },
+    {
+      "Sid": "Ec2CreateSecurityGroupInDefaultVpc",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT_ID}:vpc/${DEFAULT_VPC_ID}"
+    },
+    {
+      "Sid": "Ec2CreateSecurityGroupOnlyWithProjectTag",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT_ID}:security-group/*",
+      "Condition": {
+        "StringEquals": { "aws:RequestTag/Project": "${PROJECT_TAG}" }
+      }
+    },
+    {
+      "Sid": "Ec2TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT_ID}:security-group/*",
+        "arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT_ID}:security-group-rule/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": ["CreateSecurityGroup", "AuthorizeSecurityGroupIngress"]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2ManageOnlyProjectTaggedSecurityGroup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT_ID}:security-group/*",
+      "Condition": {
+        "StringEquals": { "aws:ResourceTag/Project": "${PROJECT_TAG}" }
+      }
+    },
+    {
+      "Sid": "Ec2IngressRuleResource",
+      "Effect": "Allow",
+      "Action": "ec2:AuthorizeSecurityGroupIngress",
+      "Resource": "arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT_ID}:security-group-rule/*"
+    }
+  ]
+}

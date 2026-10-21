@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake curl: answers checkip and the deployed application.
+url="${*: -1}"
+case "$url" in
+  *checkip*) echo "203.0.113.7" ;;
+  */health) echo '{"status":"ok"}' ;;
+  http://*:3000/) echo "<h2>Application is running successfully!</h2>" ;;
+  *) echo "fake curl: unexpected URL $url" >&2; exit 22 ;;
+esac

@@ -1,0 +1,24 @@
+# Jenkins controller for Experiment 5. Use jenkins/start.sh rather than
+# running compose directly: it sets DOCKER_GID so the jenkins user can reach
+# the Docker Desktop socket.
+#
+# Security: the mounted Docker socket gives Jenkins root-equivalent control of
+# the Docker Desktop VM, so the UI is bound to localhost only.
+name: exp5-jenkins
+
+services:
+  jenkins:
+    build: .
+    image: exp5-jenkins:2.580.1
+    container_name: exp5-jenkins
+    restart: "no"
+    ports:
+      - "127.0.0.1:8080:8080"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  jenkins_home:
